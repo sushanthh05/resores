@@ -1,0 +1,23 @@
+# Virtual Environments
+venv/
+env/
+.env
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Application Data & Outputs
+backend-ai/artifacts/
+backend-ai/model_cache/
+dataset/
+*.csv
+*.parquet
+*.jsonl
+
+# IDEs and OS Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
