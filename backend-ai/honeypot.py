@@ -31,22 +31,56 @@ def is_honeypot(candidate_dict):
             return True
             
         # ---------------------------------------------------------
-        # Rule 2: Skill marked "Expert" but 0 years of experience
+        # Rule 2: Senior title with < 3 years experience
+        # ---------------------------------------------------------
+        profile = candidate_dict.get('profile', {})
+        current_title = str(profile.get('current_title', '')).lower()
+        if any(kw in current_title for kw in ['senior', 'lead', 'principal']) and total_exp < 3.0:
+            return True
+
+        # ---------------------------------------------------------
+        # Rule 3, 4, 5: Skills and Assessments
         # ---------------------------------------------------------
         skills_data = candidate_dict.get('skills', [])
+        signals = candidate_dict.get('redrob_signals', {})
+        assessments = signals.get('skill_assessment_scores', {}) if isinstance(signals, dict) else {}
+        
+        advanced_count = 0
+        fake_duration_count = 0
+        
         if isinstance(skills_data, list):
             for skill in skills_data:
                 if isinstance(skill, dict):
                     proficiency = str(skill.get('proficiency', '')).strip().lower()
                     months = skill.get('duration_months', None)
+                    name = str(skill.get('name', ''))
                     
-                    if proficiency == 'expert':
+                    if proficiency in ['advanced', 'expert']:
+                        advanced_count += 1
+                        
+                        # Rule 3: Advanced/Expert with < 3 months duration (track count)
                         try:
-                            if months is not None and float(months) == 0.0:
-                                return True
+                            if months is not None and float(months) < 3.0:
+                                fake_duration_count += 1
                         except (ValueError, TypeError):
                             pass
                             
+                        # Rule 4: Assessment score < 20 on advanced skill
+                        if name in assessments:
+                            score = assessments[name]
+                            try:
+                                if float(score) < 20.0:
+                                    return True
+                            except (ValueError, TypeError):
+                                pass
+                                
+        if fake_duration_count > 1:
+            return True
+                                
+        # Rule 5: > 12 advanced skills but total exp < 3 years
+        if advanced_count > 12 and total_exp < 3.0:
+            return True
+            
         return False
         
     except Exception:

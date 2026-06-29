@@ -63,7 +63,7 @@ def calculate_years_experience(career_history):
 
 def build_semantic_text(row_dict):
     """
-    Combines job_title, skills, and experience into a single rich text string.
+    Combines job_title, summary, skills, career descriptions, and signals into a single rich text string.
     """
     profile = row_dict.get('profile', {})
     
@@ -71,6 +71,9 @@ def build_semantic_text(row_dict):
     job_title = str(profile.get('current_title', '')).strip()
     if job_title.lower() == 'nan':
         job_title = ""
+        
+    # Extract summary
+    summary = str(profile.get('summary', '')).strip()
     
     # Extract skills
     skills = row_dict.get('skills', [])
@@ -78,34 +81,49 @@ def build_semantic_text(row_dict):
     if isinstance(skills, list):
         parsed_skills = []
         for s in skills:
-            if isinstance(s, dict):
+            if isinstance(s, dict) and s.get('name'):
                 parsed_skills.append(str(s.get('name', '')))
-        skills_str = ", ".join([s for s in parsed_skills if s])
+        skills_str = ", ".join(parsed_skills)
         
     # Extract experience via career_history
     career_history = row_dict.get('career_history', [])
-    exp_summary = ""
+    exp_strs = []
     if isinstance(career_history, list):
-        exp_strs = []
         for exp in career_history:
             if isinstance(exp, dict):
                 title = exp.get('title', '')
                 company = exp.get('company', '')
-                if title and company:
-                    exp_strs.append(f"{title} at {company}")
-                elif title:
-                    exp_strs.append(title)
-                elif company:
-                    exp_strs.append(company)
-        exp_summary = " | ".join([e for e in exp_strs if e])
+                desc = exp.get('description', '')
+                chunk = f"{title} at {company}" if title and company else (title or company)
+                if desc:
+                    chunk += f". Description: {desc}"
+                if chunk:
+                    exp_strs.append(chunk)
+    exp_summary = " | ".join(exp_strs)
+    
+    # Extract specific signals
+    signals = row_dict.get('redrob_signals', {})
+    signal_strs = []
+    if isinstance(signals, dict):
+        if signals.get('open_to_work_flag'):
+            signal_strs.append("Open to work.")
+        assessments = signals.get('skill_assessment_scores', {})
+        if isinstance(assessments, dict) and assessments:
+            ass_str = ", ".join([f"{k}: {v}" for k, v in assessments.items()])
+            signal_strs.append(f"Assessment Scores: {ass_str}")
+    signal_summary = " ".join(signal_strs)
         
     parts = []
     if job_title:
         parts.append(f"Title: {job_title}")
+    if summary:
+        parts.append(f"Summary: {summary}")
     if skills_str:
         parts.append(f"Skills: {skills_str}")
     if exp_summary:
         parts.append(f"Experience: {exp_summary}")
+    if signal_summary:
+        parts.append(f"Signals: {signal_summary}")
         
     return ". ".join(parts) + "." if parts else ""
 
@@ -148,6 +166,9 @@ def main():
     years_experiences = []
     skills_lists = []
     career_history_jsons = []
+    redrob_signals_jsons = []
+    skills_jsons = []
+    summaries = []
     
     # We iterate using tqdm to process complex nested objects safely
     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing rows"):
@@ -176,6 +197,12 @@ def main():
             extracted_skills = [s.get('name') for s in skills if isinstance(s, dict) and s.get('name')]
         skills_lists.append(extracted_skills)
         
+        # 6. New Features for Ranker
+        summaries.append(profile.get('summary', ''))
+        signals = row_dict.get('redrob_signals', {})
+        redrob_signals_jsons.append(json.dumps(signals) if isinstance(signals, dict) else "{}")
+        skills_jsons.append(json.dumps(skills) if isinstance(skills, list) else "[]")
+        
     # Append all processed columns to DataFrame
     df['semantic_text'] = semantic_texts
     df['is_honeypot'] = is_hp_flags
@@ -183,6 +210,9 @@ def main():
     df['years_experience'] = years_experiences
     df['skills_list'] = skills_lists
     df['career_history_json'] = career_history_jsons
+    df['summary'] = summaries
+    df['redrob_signals_json'] = redrob_signals_jsons
+    df['skills_json'] = skills_jsons
     
     logging.info(f"Honeypot flagged {sum(is_hp_flags)} candidates.")
     
@@ -199,7 +229,8 @@ def main():
     # Include all our new metadata columns
     final_cols = [
         'candidate_id', 'semantic_text', 'is_honeypot', 'embedding',
-        'current_title', 'years_experience', 'skills_list', 'career_history_json'
+        'current_title', 'years_experience', 'skills_list', 'career_history_json',
+        'summary', 'redrob_signals_json', 'skills_json'
     ]
     final_cols = [c for c in final_cols if c in df.columns]
     final_df = df[final_cols]
