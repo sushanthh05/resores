@@ -247,7 +247,7 @@ def main():
     llm_cache_path.mkdir(parents=True, exist_ok=True)
     
     try:
-        qwen_name = "Qwen/Qwen2.5-0.5B-Instruct"
+        qwen_name = "HuggingFaceTB/SmolLM2-360M-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(qwen_name)
         tokenizer.save_pretrained(llm_cache_path)
         
