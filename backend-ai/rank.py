@@ -10,6 +10,7 @@ import time
 import pandas as pd
 import numpy as np
 import json
+import re
 from datetime import datetime
 import torch
 import random
@@ -168,127 +169,159 @@ def is_framework_enthusiast(skills_json, retrieval_score):
     hits = sum(1 for kw in kws if kw in text)
     return hits >= 2
 
-def generate_recruiter_reasoning(row, rank):
-    years = float(row.get('years_experience', 0.0))
+def extract_evidence_reasoning(row, jd_embedding, model, rank):
+    evidence_pool = []
+    
+    boilerplate_patterns = [
+        r'senior ai engineer with .* years',
+        r'machine learning engineer with .* years',
+        r'currently exploring my next move',
+        r'looking for senior ic roles',
+        r'open to senior ic roles',
+        r'interested in owning',
+        r'want to grow into',
+        r'looking for positions where'
+    ]
+    
+    def is_boilerplate(text):
+        lower_text = text.lower()
+        for p in boilerplate_patterns:
+            if re.search(p, lower_text): return True
+        return False
+        
+    def score_career_sentence(text):
+        lower_text = text.lower()
+        if any(w in lower_text for w in ['%', 'latency', 'queries', 'query', 'users', 'user', 'a/b', 'ndcg', 'mrr', 'map', 'recall', 'p95', 'engagement', 'cost', 'serving']):
+            return 10.0, 'A1' # Measurable
+        if any(w in lower_text for w in ['grew team', 'mentored', 'owned', 'led', 'managed']):
+            return 8.0, 'A2' # Leadership
+        if any(w in lower_text for w in ['end-to-end', 'product', 'pm', 'roadmap', 'production']):
+            return 7.0, 'A3' # Product
+        return 3.0, 'A'
+    
+    # 1. Summary
     summary = str(row.get('summary', ''))
+    if summary and summary.lower() != 'nan':
+        for s in re.split(r'(?<=[.!?])\s+', summary):
+            s = s.strip()
+            if len(s.split()) > 4:
+                priority = -10.0 if is_boilerplate(s) else 7.0
+                evidence_pool.append({'text': s, 'category': 'B', 'priority': priority})
+            
+    # 2. Career History
     cj = str(row.get('career_history_json', '[]'))
+    try: history = json.loads(cj)
+    except: history = []
+    companies = []
+    if isinstance(history, list):
+        for role in history:
+            if isinstance(role, dict):
+                comp = role.get('company', '')
+                if comp: companies.append(comp)
+                desc = str(role.get('description', ''))
+                for s in re.split(r'(?<=[.!?])\s+', desc):
+                    s = s.strip()
+                    if len(s.split()) > 4: 
+                        priority, cat = score_career_sentence(s)
+                        if is_boilerplate(s): priority = -10.0
+                        evidence_pool.append({'text': s, 'category': cat, 'priority': priority})
+                    
+    # Company background
+    if companies:
+        evidence_pool.append({'text': f"Experience at {', '.join(set(companies[:3]))}.", 'category': 'C', 'priority': 4.0})
+                    
+    # 3. Skills
     sj = str(row.get('skills_json', '[]'))
+    try: skills = json.loads(sj)
+    except: skills = []
+    if isinstance(skills, list):
+        for skill in skills:
+            if isinstance(skill, dict):
+                prof = str(skill.get('proficiency', '')).lower()
+                name = str(skill.get('name', ''))
+                if prof in ['advanced', 'expert'] and name:
+                    evidence_pool.append({'text': f"{prof.capitalize()}-level experience with {name}.", 'category': 'E', 'priority': 1.0})
+                    
+    # 4. Recruiter Signals
     rj = str(row.get('redrob_signals_json', '{}'))
-    
-    full_text = f"{summary} {cj} {sj}".lower()
-    
     try: sig = json.loads(rj)
     except: sig = {}
     
-    retrieval_kws = ['retrieval', 'ranking', 'recommendation', 'search', 'relevance', 'matching', 'semantic search', 'vector search', 'information retrieval']
-    eval_kws = ['ndcg', 'map', 'mrr', 'recall@k', 'offline evaluation', 'online evaluation', 'a/b testing', 'experimentation', 'calibration', 'relevance metrics']
-    prod_kws = ['deployed', 'production', 'shipped', 'scaling', 'latency', 'monitoring', 'serving', 'real users', 'traffic', 'feature store', 'drift detection']
-    infra_kws = ['pinecone', 'qdrant', 'weaviate', 'faiss', 'elasticsearch', 'opensearch', 'milvus', 'pgvector']
-    llm_kws = ['lora', 'qlora', 'peft', 'fine tuning', 'quantization', 'serving optimization']
-    company_kws = ['meta', 'google', 'netflix', 'microsoft', 'razorpay', 'flipkart', 'swiggy', 'zomato', 'startup']
-    lead_kws = ['owned', 'led', 'mentored', 'built team', 'architecture ownership']
-    
-    has_ret = any(k in full_text for k in retrieval_kws)
-    has_eval = any(k in full_text for k in eval_kws)
-    has_prod = any(k in full_text for k in prod_kws)
-    has_infra = any(k in full_text for k in infra_kws)
-    has_llm = any(k in full_text for k in llm_kws)
-    has_comp = any(k in full_text for k in company_kws)
-    has_lead = any(k in full_text for k in lead_kws)
-    
-    ret_count = sum(1 for k in retrieval_kws if k in full_text)
-    rec_count = sum(1 for k in ['recommendation', 'personalization', 'behavioral signals', 'collaborative filtering'] if k in full_text)
-    llm_count = sum(1 for k in llm_kws if k in full_text)
-    
-    if ret_count > 0 and ret_count >= rec_count: archetype = "Retrieval"
-    elif rec_count > 0: archetype = "Recommendation"
-    elif has_prod and not has_ret: archetype = "Production ML"
-    elif llm_count > 0: archetype = "LLM Infrastructure"
-    elif sum(1 for k in ['research', 'paper', 'experiment'] if k in full_text) > 2 and not has_prod: archetype = "Applied Scientist"
-    else: archetype = "Software"
-    
-    if rank <= 10: align_phrases = ["strong alignment", "direct overlap", "extensive ownership", "deep expertise"]
-    elif rank <= 50: align_phrases = ["relevant exposure", "experience with", "demonstrated familiarity", "solid background"]
-    else: align_phrases = ["some exposure", "partial overlap", "adjacent experience", "basic familiarity"]
+    if 'recruiter_response_rate' in sig:
+        evidence_pool.append({'text': f"Recruiter response rate of {int(float(sig['recruiter_response_rate'])*100)}%.", 'category': 'D', 'priority': 5.0})
+    if sig.get('saved_by_recruiters_30d', 0) > 0:
+        evidence_pool.append({'text': f"Saved by recruiters {int(sig['saved_by_recruiters_30d'])} times in the last 30 days.", 'category': 'D', 'priority': 5.0})
+    if sig.get('open_to_work_flag'):
+        relocate = " and willing to relocate" if sig.get('willing_to_relocate') else ""
+        evidence_pool.append({'text': f"Open to work{relocate}.", 'category': 'D', 'priority': 5.0})
         
-    rng = random.Random(str(row.get('candidate_id', 'unknown')))
-    align_phrase = rng.choice(align_phrases)
-    
-    str_templates = []
-    
-    if archetype == "Retrieval":
-        str_templates.append(f"Built retrieval and ranking systems with {align_phrase} of relevance optimization.")
-        str_templates.append(f"Experience with vector search systems demonstrates {align_phrase} with Redrob's intelligence-layer requirements.")
-        str_templates.append(f"Demonstrates {align_phrase} of end-to-end retrieval pipelines, from offline metric tuning to production deployment.")
-        if has_infra: str_templates.append(f"Hands-on experience operating vector retrieval infrastructure and large-scale embedding pipelines in production environments.")
-    elif archetype == "Recommendation":
-        str_templates.append(f"Experience with recommendation pipelines and behavioral reranking aligns closely with Redrob's matching requirements.")
-        str_templates.append(f"Built personalization engines with {align_phrase} of collaborative filtering and relevance metrics.")
-    elif archetype == "Production ML":
-        str_templates.append(f"Track record of shipping production systems and iterating using user feedback matches the product-engineering expectations.")
-        str_templates.append(f"Strong focus on latency optimization and serving systems indicates {align_phrase} with solid engineering fundamentals.")
-    elif archetype == "LLM Infrastructure":
-        str_templates.append(f"Technical depth in fine-tuning and inference optimization provides {align_phrase} with modern AI architectures.")
-    elif archetype == "Applied Scientist":
-        str_templates.append(f"Deep theoretical background with {align_phrase} applying research to offline evaluation workflows.")
-        
-    if has_eval:
-        str_templates.append(f"Demonstrated ownership of offline metrics and online experimentation including NDCG and A/B testing workflows.")
-    if has_lead:
-        str_templates.append(f"Previous architecture ownership and mentoring responsibilities indicate senior IC readiness.")
-    if has_comp:
-        str_templates.append(f"Background at major product-focused tech companies suggests high cultural alignment.")
-        
-    if not str_templates:
-        str_templates.append(f"Profile shows {align_phrase} with core machine learning technologies required for the role.")
-        str_templates.append(f"General software engineering background with {align_phrase} of Python and modern data stacks.")
-        
-    num_str = 2 if len(str_templates) > 1 and rank <= 10 else 1
-    selected_strengths = rng.sample(str_templates, num_str)
-    
     concerns = []
-    
-    np_days = float(sig.get('notice_period_days', 0))
-    if np_days > 60: concerns.append(f"Longer {int(np_days)}-day notice period slightly reduces immediate availability.")
+    if sig.get('notice_period_days', 0) > 30:
+        concerns.append({'text': f"Current notice period is {int(sig['notice_period_days'])} days.", 'category': 'D', 'priority': 5.0})
+    if float(sig.get('recruiter_response_rate', 1.0)) < 0.2:
+        concerns.append({'text': f"Recruiter response rate is {int(float(sig['recruiter_response_rate'])*100)}%.", 'category': 'D', 'priority': 5.0})
     
     last_active = str(sig.get('last_active_date', ''))
     if last_active:
         try:
-            active_dt = datetime.strptime(last_active, "%Y-%m-%d")
-            days_inactive = (REFERENCE_DATE - active_dt).days
-            if days_inactive > 180: concerns.append("Lower recent platform activity reduces confidence in current job-search intent.")
+            days_inactive = (REFERENCE_DATE - datetime.strptime(last_active, "%Y-%m-%d")).days
+            if days_inactive > 180: concerns.append({'text': f"Profile has been inactive for more than {days_inactive} days.", 'category': 'D', 'priority': 5.0})
         except: pass
-        
     if sig.get('open_to_work_flag') is False:
-        concerns.append("Not currently marked as open to work.")
+        concerns.append({'text': "Not currently open to work.", 'category': 'D', 'priority': 5.0})
         
-    if float(sig.get('recruiter_response_rate', 1.0)) < 0.2:
-        concerns.append("Limited recruiter responsiveness historically lowers short-term hiring probability.")
+    # Clean pool
+    weak_words = ['passionate', 'comfortable', 'strong communication', 'excellent', 'outstanding', 'proven track']
+    clean_pool = []
+    seen = set()
+    for ev in evidence_pool:
+        ev_lower = ev['text'].lower()
+        if ev_lower in seen: continue
+        if any(w in ev_lower for w in weak_words): continue
+        seen.add(ev_lower)
+        clean_pool.append(ev)
         
-    if has_ret and not has_eval:
-        concerns.append("Shows retrieval exposure but limited evidence of ranking evaluation or relevance metrics.")
+    if not clean_pool:
+        return "No specific evidence found."
         
-    if has_llm and not has_eval:
-        concerns.append("Demonstrates LLM experience but lacks a strong evaluation background.")
+    # Encode and score
+    texts = [ev['text'] for ev in clean_pool]
+    embeddings = model.encode(texts, convert_to_tensor=True)
+    sims = util.cos_sim(jd_embedding, embeddings)[0].cpu().numpy()
+    
+    for i, ev in enumerate(clean_pool):
+        ev['sim'] = float(sims[i])
+        ev['final_score'] = ev['sim'] * ev['priority']
         
-    if not has_prod and rank > 50:
-        concerns.append("Profile leans more toward research or offline development than production deployment relative to higher-ranked candidates.")
+    # Sort descending by final score
+    clean_pool.sort(key=lambda x: x['final_score'], reverse=True)
+    
+    # Rank awareness logic
+    if rank <= 10: num_ev = 3
+    elif rank <= 50: num_ev = 2
+    else: num_ev = 1
+    
+    selected = []
+    has_skill = False
+    
+    for ev in clean_pool:
+        if len(selected) >= num_ev:
+            break
+        if ev['category'] == 'E':
+            if has_skill: continue
+            has_skill = True
+        selected.append(ev['text'])
+    
+    if rank > 50 and concerns:
+        selected.append(concerns[0]['text'])
         
-    try:
-        history = json.loads(cj)
-        if isinstance(history, list):
-            consulting_firms = ['wipro', 'infosys', 'tcs', 'cognizant', 'accenture', 'capgemini', 'it services', 'consulting']
-            total_months = sum(float(r.get('duration_months', 0)) for r in history if isinstance(r, dict))
-            consulting_months = sum(float(r.get('duration_months', 0)) for r in history if isinstance(r, dict) and any(kw in f"{r.get('company', '')} {r.get('industry', '')}".lower() for kw in consulting_firms))
-            if total_months > 0 and consulting_months / total_months > 0.8:
-                concerns.append("Career history shows limited ownership in product environments compared with higher-ranked candidates.")
-    except: pass
+    final_str = " ".join(selected)
+    
+    if len(final_str.split()) > 80 and len(selected) > 2:
+        selected = selected[:2]
+        final_str = " ".join(selected)
         
-    final_sentences = selected_strengths
-    if concerns:
-        final_sentences.append(rng.choice(concerns))
-        
-    return " ".join(final_sentences)
+    return final_str
 
 def main():
     parser = argparse.ArgumentParser(description="Rank candidates for the Talent Resonance Engine")
@@ -409,21 +442,20 @@ def main():
     print(f"[Timing] Sorting & Slicing took {time.time() - t4:.4f} seconds.")
 
     # ---------------------------------------------------------
-    # 5. Deterministic Reasoning Generation
+    # 6. Extractive Evidence-Based Reasoning Generation
     # ---------------------------------------------------------
     t5 = time.time()
-    print("Generating deterministic evidence-based recruiter reasoning strings...")
+    print("Extracting pure evidence-based reasoning via Extractive RAG (all-MiniLM-L6-v2)...")
     
     reasoning_list = []
     
     for i, row in top_100.iterrows():
-        # Rank is effectively index in top_100 + 1 (assuming it is sorted and reset, but let's calculate based on actual position in the df)
         rank_position = list(top_100.index).index(i) + 1
-        reasoning = generate_recruiter_reasoning(row, rank_position)
+        reasoning = extract_evidence_reasoning(row, jd_embedding, model, rank_position)
         reasoning_list.append(reasoning)
 
     top_100['reasoning'] = reasoning_list
-    print(f"[Timing] Recruiter Reasoning Generation took {time.time() - t5:.4f} seconds.")
+    print(f"[Timing] Extractive Reasoning Generation took {time.time() - t5:.4f} seconds.")
 
     # ---------------------------------------------------------
     # 7. Strict CSV Output
